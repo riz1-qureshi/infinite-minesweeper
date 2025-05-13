@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Minesweeper</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#333333">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            background-color: #f0f0f0;
+            touch-action: none;
+        }
+
+        #game-info {
+            margin: 10px;
+            padding: 10px;
+            background-color: #ddd;
+            border-radius: 5px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }
+
+        #game-info button, #game-info select {
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .info-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #zoom-slider {
+            width: 100px;
+        }
+
+        #game-container {
+            width: 90vw;
+            height: 75vh;
+            max-width: 800px;
+            max-height: 600px;
+            overflow: auto;
+            border: 2px solid #333;
+            position: relative;
+            background-color: #ccc;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+        }
+
+        #world {
+            position: absolute;
+            width: 200000px;
+            height: 200000px;
+            left: 0;
+            top: 0;
+        }
+
+        .cell {
+            border: 1px solid #999;
+            background-color: #bbb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            cursor: pointer;
+            user-select: none;
+            position: absolute;
+            box-sizing: border-box;
+        }
+
+        .cell.revealed {
+            background-color: #ddd;
+            border-color: #aaa;
+        }
+
+        .cell.mine {
+            background-color: red;
+            color: black;
+        }
+        .cell.number-1 { color: blue; }
+        .cell.number-2 { color: green; }
+        .cell.number-3 { color: red; }
+        .cell.number-4 { color: darkblue; }
+        .cell.number-5 { color: brown; }
+        .cell.number-6 { color: cyan; }
+        .cell.number-7 { color: black; }
+        .cell.number-8 { color: grey; }
+
+        #game-over-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0, 0, 0, 0.7); color: white;
+            display: none; flex-direction: column;
+            align-items: center; justify-content: center;
+            font-size: 2em; z-index: 1000;
+        }
+        #game-over-overlay button { margin-top: 20px; padding: 10px 20px; font-size: 0.8em; }
+
+        #mini-map-container {
+            position: fixed; bottom: 10px; left: 10px;
+            background-color: rgba(200, 200, 200, 0.8);
+            border: 1px solid #666; border-radius: 5px; padding: 5px;
+            z-index: 500; box-shadow: 0 0 5px rgba(0,0,0,0.3);
+        }
+        #mini-map-canvas { display: block; border: 1px solid #888; }
+        #coordinates-display {
+            position: fixed; bottom: 10px; right: 10px;
+            background-color: rgba(50, 50, 50, 0.7); color: white;
+            padding: 5px 10px; border-radius: 3px; font-size: 12px;
+            z-index: 500;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-info">
+        <div class="info-group"><span>Flags: <span id="flag-count">0</span></span></div>
+        <div class="info-group">
+            <label for="zoom-slider">Zoom:</label>
+            <input type="range" id="zoom-slider" min="15" max="50" value="21">
+            <span id="zoom-value">21px</span>
+        </div>
+        <button id="mode-toggle-button">Mode: Click</button>
+        <button id="reset-button">New Game</button>
+        <button id="center-button">Center (0,0)</button>
+    </div>
+
+    <div id="game-container"><div id="world"></div></div>
+
+    <div id="game-over-overlay"><div>GAME OVER!</div><button id="overlay-reset-button">Play Again</button></div>
+
+    <div id="mini-map-container"><canvas id="mini-map-canvas" width="150" height="100"></canvas></div>
+    <div id="coordinates-display">Coords: (0, 0)</div>
+
+    <script>
+        const gameContainer = document.getElementById('game-container');
+        const world = document.getElementById('world');
+        const flagCountDisplay = document.getElementById('flag-count');
+        const resetButton = document.getElementById('reset-button');
+        const centerButton = document.getElementById('center-button');
+        const gameOverOverlay = document.getElementById('game-over-overlay');
+        const overlayResetButton = document.getElementById('overlay-reset-button');
+        const zoomSlider = document.getElementById('zoom-slider');
+        const zoomValueDisplay = document.getElementById('zoom-value');
+        const modeToggleButton = document.getElementById('mode-toggle-button');
+
+        const miniMapCanvas = document.getElementById('mini-map-canvas');
+        const miniMapCtx = miniMapCanvas.getContext('2d');
+        const coordinatesDisplay = document.getElementById('coordinates-display');
+        const MINI_MAP_CELL_SIZE = 1;
+        const MINI_MAP_WIDTH = miniMapCanvas.width;
+        const MINI_MAP_HEIGHT = miniMapCanvas.height;
+
+        const PRNG_SEED_OFFSET = 12345; // Base offset, still useful
+        let currentGameSeed; // Will be set in initGame()
+        const GAP_SIZE = 1;
+        const EASY_DENSITY = 0.10;
+        let currentMineDensity = EASY_DENSITY;
+        let CELL_SIZE = parseInt(zoomSlider.value);
+
+        let worldPhysicalWidth, worldPhysicalHeight;
+        const RECENTER_THRESHOLD_FACTOR = 0.25;
+        const RECENTER_SHIFT_FACTOR = 0.5;
+
+        let WORLD_ORIGIN_X;
+        let WORLD_ORIGIN_Y;
+
+        let cellStates = new Map();
+        let gameOver = false;
+        let flagCount = 0;
+        let mineExploded = false;
+        let currentInteractionMode = 'click';
+
+        let dynamicStylesElement = document.createElement('style');
+        document.head.appendChild(dynamicStylesElement);
+
+        function updateDynamicStyles() {
+            const visualCellSize = CELL_SIZE - GAP_SIZE;
+            const flagFontSize = Math.floor(visualCellSize * 0.6);
+            const cellContentFontSize = Math.floor(visualCellSize * 0.65);
+            dynamicStylesElement.textContent = `
+                .cell.flagged::before {
+                    content: "🚩";
+                    font-size: ${flagFontSize}px !important;
+                }
+                .cell { font-size: ${cellContentFontSize}px; }
+            `;
+        }
+
+        function initializeWorldDimensions() {
+            const computedWorldStyle = window.getComputedStyle(world);
+            worldPhysicalWidth = parseFloat(computedWorldStyle.width);
+            worldPhysicalHeight = parseFloat(computedWorldStyle.height);
+
+            if (isNaN(worldPhysicalWidth) || isNaN(worldPhysicalHeight)) {
+                console.error("Could not determine #world dimensions. Using fallback.");
+                worldPhysicalWidth = 200000; worldPhysicalHeight = 200000;
+            }
+            WORLD_ORIGIN_X = worldPhysicalWidth / 2;
+            WORLD_ORIGIN_Y = worldPhysicalHeight / 2;
+        }
+
+        function getPseudoRandom(x, y, seedOffset = 0) {
+            let hash = (x * 183979) ^ (y * 367413) ^ (seedOffset * 548611);
+            hash = hash * 1664525 + 1013904223; hash = (hash & 0x7FFFFFFF);
+            return (hash % 10000) / 10000;
+        }
+
+        function isMine(x, y) {
+            const key = `${x},${y}`;
+            if (cellStates.has(key) && cellStates.get(key).isMineCached !== undefined) {
+                return cellStates.get(key).isMineCached;
+            }
+            // Use PRNG_SEED_OFFSET + currentGameSeed to ensure different layouts per game
+            const mine = getPseudoRandom(x, y, PRNG_SEED_OFFSET + currentGameSeed) < currentMineDensity;
+            if (!cellStates.has(key)) cellStates.set(key, {});
+            cellStates.get(key).isMineCached = mine;
+            return mine;
+        }
+
+        function countAdjacentMines(x, y) {
+            const key = `${x},${y}`;
+            if (cellStates.has(key) && cellStates.get(key).adjacentMinesCached !== undefined) {
+                return cellStates.get(key).adjacentMinesCached;
+            }
+            let count = 0;
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    if (dx === 0 && dy === 0) continue;
+                    if (isMine(x + dx, y + dy)) count++;
+                }
+            }
+            if (!cellStates.has(key)) cellStates.set(key, {});
+            cellStates.get(key).adjacentMinesCached = count;
+            return count;
+        }
+        function getCellState(x, y) {
+            const key = `${x},${y}`;
+            return cellStates.get(key) || { revealed: false, flagged: false };
+        }
+        function updateCellDOM(cellElement, x, y) {
+            const state = getCellState(x, y);
+            cellElement.className = 'cell'; cellElement.textContent = '';
+            const visualSize = CELL_SIZE - GAP_SIZE;
+            cellElement.style.width = `${visualSize}px`; cellElement.style.height = `${visualSize}px`;
+
+            if (state.flagged) {
+                cellElement.classList.add('flagged');
+            } else if (state.revealed) {
+                cellElement.classList.add('revealed');
+                if (isMine(x, y)) {
+                    cellElement.classList.add('mine'); cellElement.textContent = '💣';
+                } else {
+                    const adjMines = countAdjacentMines(x, y);
+                    if (adjMines > 0) {
+                        cellElement.textContent = adjMines; cellElement.classList.add(`number-${adjMines}`);
+                    }
+                }
+            }
+            if (gameOver && isMine(x,y) && !state.flagged && !state.revealed) {
+                 cellElement.classList.add('revealed', 'mine'); cellElement.textContent = '💣';
+            }
+            if (gameOver && !isMine(x,y) && state.flagged) {
+                cellElement.classList.add('revealed'); cellElement.textContent = '❌';
+            }
+        }
+
+        function checkAndRecenterWorld() {
+            if (!worldPhysicalWidth) return false;
+
+            let shiftX = 0;
+            let shiftY = 0;
+            const thresholdX = worldPhysicalWidth * RECENTER_THRESHOLD_FACTOR;
+            const thresholdY = worldPhysicalHeight * RECENTER_THRESHOLD_FACTOR;
+
+            if (gameContainer.scrollLeft < thresholdX) {
+                shiftX = worldPhysicalWidth * RECENTER_SHIFT_FACTOR;
+            }
+            else if (gameContainer.scrollLeft > worldPhysicalWidth - gameContainer.clientWidth - thresholdX) {
+                shiftX = -worldPhysicalWidth * RECENTER_SHIFT_FACTOR;
+            }
+
+            if (gameContainer.scrollTop < thresholdY) {
+                shiftY = worldPhysicalHeight * RECENTER_SHIFT_FACTOR;
+            }
+            else if (gameContainer.scrollTop > worldPhysicalHeight - gameContainer.clientHeight - thresholdY) {
+                shiftY = -worldPhysicalHeight * RECENTER_SHIFT_FACTOR;
+            }
+
+            if (shiftX !== 0 || shiftY !== 0) {
+                WORLD_ORIGIN_X -= shiftX;
+                WORLD_ORIGIN_Y -= shiftY;
+
+                const oldScrollLeft = gameContainer.scrollLeft;
+                const oldScrollTop = gameContainer.scrollTop;
+
+                gameContainer.scrollLeft = oldScrollLeft + shiftX;
+                gameContainer.scrollTop = oldScrollTop + shiftY;
+
+                return true;
+            }
+            return false;
+        }
+
+
+        function renderVisibleCells() {
+            if (!gameContainer || WORLD_ORIGIN_X === undefined) return;
+
+            if (checkAndRecenterWorld()) {
+                // World was recentered, scroll position adjusted.
+            }
+
+            world.innerHTML = '';
+            const buffer = 3;
+
+            const viewPortGridX = (gameContainer.scrollLeft - WORLD_ORIGIN_X) / CELL_SIZE;
+            const viewPortGridY = (gameContainer.scrollTop - WORLD_ORIGIN_Y) / CELL_SIZE;
+            const viewPortGridWidth = gameContainer.clientWidth / CELL_SIZE;
+            const viewPortGridHeight = gameContainer.clientHeight / CELL_SIZE;
+
+            const startCol = Math.floor(viewPortGridX) - buffer;
+            const endCol = Math.ceil(viewPortGridX + viewPortGridWidth) + buffer;
+            const startRow = Math.floor(viewPortGridY) - buffer;
+            const endRow = Math.ceil(viewPortGridY + viewPortGridHeight) + buffer;
+
+            for (let y = startRow; y <= endRow; y++) {
+                for (let x = startCol; x <= endCol; x++) {
+                    const cellElement = document.createElement('div');
+                    cellElement.dataset.x = x; cellElement.dataset.y = y;
+                    cellElement.style.left = `${WORLD_ORIGIN_X + x * CELL_SIZE}px`;
+                    cellElement.style.top = `${WORLD_ORIGIN_Y + y * CELL_SIZE}px`;
+                    updateCellDOM(cellElement, x, y);
+                    world.appendChild(cellElement);
+                }
+            }
+            updateMiniMapAndCoords();
+        }
+
+        function revealCell(x, y, isChainedCall = false) {
+            if (gameOver) return;
+            const key = `${x},${y}`;
+            const state = getCellState(x, y);
+            if (state.revealed || state.flagged) return;
+
+            if (!cellStates.has(key)) cellStates.set(key, {});
+            cellStates.get(key).revealed = true;
+
+            if (isMine(x, y)) {
+                if (!mineExploded) {
+                    mineExploded = true;
+                    gameOver = true;
+                    gameOverOverlay.style.display = 'flex';
+                    renderVisibleCells();
+                    requestAnimationFrame(updateMiniMapAndCoords);
+                }
+                return;
+            }
+
+            const adjMines = countAdjacentMines(x, y);
+            if (adjMines === 0) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dy = -1; dy <= 1; dy++) {
+                        if (dx === 0 && dy === 0) continue;
+                        revealCell(x + dx, y + dy, true);
+                    }
+                }
+            }
+
+            if (!isChainedCall && !gameOver) {
+                renderVisibleCells();
+                requestAnimationFrame(updateMiniMapAndCoords);
+            }
+        }
+
+        function toggleFlag(x, y) {
+            if (gameOver) return;
+            const state = getCellState(x, y);
+            if (state.revealed) return;
+
+            const key = `${x},${y}`;
+            if (!cellStates.has(key)) cellStates.set(key, {});
+            const currentCellState = cellStates.get(key);
+            currentCellState.flagged = !currentCellState.flagged;
+
+            if (currentCellState.flagged) flagCount++; else flagCount--;
+            flagCountDisplay.textContent = flagCount;
+
+            const cellElement = world.querySelector(`.cell[data-x="${x}"][data-y="${y}"]`);
+            if (cellElement) updateCellDOM(cellElement, x, y);
+            requestAnimationFrame(updateMiniMapAndCoords);
+        }
+
+        function updateMiniMapAndCoords() {
+            if (WORLD_ORIGIN_X === undefined) return;
+
+            const centerX_pixels_world = gameContainer.scrollLeft + gameContainer.clientWidth / 2;
+            const centerY_pixels_world = gameContainer.scrollTop + gameContainer.clientHeight / 2;
+            const center_grid_x = Math.round((centerX_pixels_world - WORLD_ORIGIN_X) / CELL_SIZE);
+            const center_grid_y = Math.round((centerY_pixels_world - WORLD_ORIGIN_Y) / CELL_SIZE);
+            coordinatesDisplay.textContent = `Coords: (${center_grid_x}, ${center_grid_y})`;
+
+            miniMapCtx.fillStyle = '#aaa';
+            miniMapCtx.fillRect(0, 0, MINI_MAP_WIDTH, MINI_MAP_HEIGHT);
+
+            const miniMapGridWidth = MINI_MAP_WIDTH / MINI_MAP_CELL_SIZE;
+            const miniMapGridHeight = MINI_MAP_HEIGHT / MINI_MAP_CELL_SIZE;
+            const miniMapStartGridX = center_grid_x - miniMapGridWidth / 2;
+            const miniMapStartGridY = center_grid_y - miniMapGridHeight / 2;
+
+            cellStates.forEach((state, key) => {
+                if (state.revealed || state.flagged) {
+                    const [xStr, yStr] = key.split(',');
+                    const x = parseInt(xStr); const y = parseInt(yStr);
+                    const miniMapX = (x - miniMapStartGridX) * MINI_MAP_CELL_SIZE;
+                    const miniMapY = (y - miniMapStartGridY) * MINI_MAP_CELL_SIZE;
+
+                    if (miniMapX >= 0 && miniMapX < MINI_MAP_WIDTH && miniMapY >= 0 && miniMapY < MINI_MAP_HEIGHT) {
+                        if (state.flagged) miniMapCtx.fillStyle = 'blue';
+                        else if (state.revealed && isMine(x, y)) miniMapCtx.fillStyle = 'red';
+                        else if (state.revealed) miniMapCtx.fillStyle = '#e0e0e0';
+                        miniMapCtx.fillRect(Math.floor(miniMapX), Math.floor(miniMapY), MINI_MAP_CELL_SIZE, MINI_MAP_CELL_SIZE);
+                    }
+                }
+            });
+
+            const viewPortGridX = (gameContainer.scrollLeft - WORLD_ORIGIN_X) / CELL_SIZE;
+            const viewPortGridY = (gameContainer.scrollTop - WORLD_ORIGIN_Y) / CELL_SIZE;
+            const viewPortGridWidth = gameContainer.clientWidth / CELL_SIZE;
+            const viewPortGridHeight = gameContainer.clientHeight / CELL_SIZE;
+            const miniMapViewX = (viewPortGridX - miniMapStartGridX) * MINI_MAP_CELL_SIZE;
+            const miniMapViewY = (viewPortGridY - miniMapStartGridY) * MINI_MAP_CELL_SIZE;
+            const miniMapViewWidth = viewPortGridWidth * MINI_MAP_CELL_SIZE;
+            const miniMapViewHeight = viewPortGridHeight * MINI_MAP_CELL_SIZE;
+            miniMapCtx.strokeStyle = 'rgba(0, 255, 0, 0.7)'; miniMapCtx.lineWidth = 1;
+            miniMapCtx.strokeRect(Math.floor(miniMapViewX), Math.floor(miniMapViewY), Math.ceil(miniMapViewWidth), Math.ceil(miniMapViewHeight));
+
+            const originMiniMapX = (0 - miniMapStartGridX) * MINI_MAP_CELL_SIZE;
+            const originMiniMapY = (0 - miniMapStartGridY) * MINI_MAP_CELL_SIZE;
+            if (originMiniMapX >= 0 && originMiniMapX < MINI_MAP_WIDTH && originMiniMapY >= 0 && originMiniMapY < MINI_MAP_HEIGHT) {
+                miniMapCtx.fillStyle = 'black';
+                miniMapCtx.fillRect(Math.floor(originMiniMapX) -1, Math.floor(originMiniMapY) -1, 3, 3);
+            }
+        }
+
+        function handleCellClick(event) {
+            const cell = event.target.closest('.cell');
+            if (!cell || !cell.dataset.x) return;
+            const x = parseInt(cell.dataset.x);
+            const y = parseInt(cell.dataset.y);
+
+            if (event.button === 0) {
+                if (currentInteractionMode === 'click') {
+                    revealCell(x, y);
+                } else {
+                    toggleFlag(x, y);
+                }
+            } else if (event.button === 2) {
+                toggleFlag(x, y);
+            }
+        }
+        function handleContextMenu(event) { if (event.target.closest('.cell')) event.preventDefault(); }
+
+        let scrollTimeout;
+        function handleScroll() {
+            clearTimeout(scrollTimeout);
+            scrollTimeout = setTimeout(() => {
+                requestAnimationFrame(renderVisibleCells);
+            }, 20);
+        }
+
+        function centerViewOn(targetX, targetY) {
+            if (WORLD_ORIGIN_X === undefined) initializeWorldDimensions();
+            if (WORLD_ORIGIN_X === undefined) return;
+
+            const targetPixelXInWorld = WORLD_ORIGIN_X + targetX * CELL_SIZE;
+            const targetPixelYInWorld = WORLD_ORIGIN_Y + targetY * CELL_SIZE;
+
+            let newScrollLeft = targetPixelXInWorld - (gameContainer.clientWidth / 2) + (CELL_SIZE / 2);
+            let newScrollTop = targetPixelYInWorld - (gameContainer.clientHeight / 2) + (CELL_SIZE / 2);
+
+            if (targetX === 0 && targetY === 0) {
+                WORLD_ORIGIN_X = worldPhysicalWidth / 2;
+                WORLD_ORIGIN_Y = worldPhysicalHeight / 2;
+                newScrollLeft = WORLD_ORIGIN_X - (gameContainer.clientWidth / 2) + (CELL_SIZE / 2);
+                newScrollTop = WORLD_ORIGIN_Y - (gameContainer.clientHeight / 2) + (CELL_SIZE / 2);
+            }
+
+            gameContainer.scrollLeft = newScrollLeft;
+            gameContainer.scrollTop = newScrollTop;
+
+            requestAnimationFrame(renderVisibleCells);
+        }
+
+        function handleZoomChange(event) {
+            const newCellSize = parseInt(event.target.value);
+            zoomValueDisplay.textContent = `${newCellSize}px`;
+
+            const vpCenterX_pixels_world = gameContainer.scrollLeft + gameContainer.clientWidth / 2;
+            const vpCenterY_pixels_world = gameContainer.scrollTop + gameContainer.clientHeight / 2;
+            const center_grid_x = (vpCenterX_pixels_world - WORLD_ORIGIN_X) / CELL_SIZE;
+            const center_grid_y = (vpCenterY_pixels_world - WORLD_ORIGIN_Y) / CELL_SIZE;
+
+            CELL_SIZE = newCellSize;
+            updateDynamicStyles();
+
+            const new_target_pixel_x_world = WORLD_ORIGIN_X + center_grid_x * CELL_SIZE;
+            const new_target_pixel_y_world = WORLD_ORIGIN_Y + center_grid_y * CELL_SIZE;
+            gameContainer.scrollLeft = new_target_pixel_x_world - gameContainer.clientWidth / 2;
+            gameContainer.scrollTop = new_target_pixel_y_world - gameContainer.clientHeight / 2;
+
+            renderVisibleCells();
+        }
+
+        function initGame() {
+            if (worldPhysicalWidth === undefined) initializeWorldDimensions();
+
+            currentGameSeed = Math.floor(Math.random() * 1000000); // Generate new seed for this game
+
+            currentMineDensity = EASY_DENSITY;
+            CELL_SIZE = parseInt(zoomSlider.value);
+            zoomValueDisplay.textContent = `${CELL_SIZE}px`;
+            updateDynamicStyles();
+
+            cellStates.clear(); // Crucial: clears cached mine states from previous game
+            gameOver = false; mineExploded = false; flagCount = 0;
+            flagCountDisplay.textContent = '0';
+            gameOverOverlay.style.display = 'none';
+
+            currentInteractionMode = 'click';
+            if (modeToggleButton) modeToggleButton.textContent = 'Mode: Click';
+
+            centerViewOn(0,0);
+        }
+
+        // Event Listeners
+        world.addEventListener('mousedown', handleCellClick);
+        world.addEventListener('contextmenu', handleContextMenu);
+        gameContainer.addEventListener('scroll', handleScroll);
+        resetButton.addEventListener('click', initGame);
+        overlayResetButton.addEventListener('click', initGame);
+        centerButton.addEventListener('click', () => centerViewOn(0,0));
+        zoomSlider.addEventListener('input', handleZoomChange);
+        modeToggleButton.addEventListener('click', () => {
+            if (currentInteractionMode === 'click') {
+                currentInteractionMode = 'flag';
+                modeToggleButton.textContent = 'Mode: Flag 🚩';
+            } else {
+                currentInteractionMode = 'click';
+                modeToggleButton.textContent = 'Mode: Click';
+            }
+        });
+
+
+        // Initial game setup
+        initializeWorldDimensions();
+        initGame();
+
+        // PWA Service Worker Registration
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(registration => {
+                        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                    })
+                    .catch(err => {
+                        console.log('ServiceWorker registration failed: ', err);
+                    });
+            });
+        }
+    </script>
+</body>
+</html>
