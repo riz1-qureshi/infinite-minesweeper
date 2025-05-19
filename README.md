@@ -5,6 +5,7 @@ Play it here: https://riz1-qureshi.github.io/infinite-minesweeper/
 
 Updates to do:
 - Add Medium, Hard, and Extreme difficulties (they used to be there but I removed them for simplicity)
+- Add keyboard button instructions somewhere
 - Add texture packs?
 - Allow pinch to zoom for mobile gamers
 - Allow seeded runs?
